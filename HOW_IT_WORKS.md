@@ -14,7 +14,7 @@
 4. [Complete Data Flow — Step by Step](#4-complete-data-flow--step-by-step)
 5. [Technology Stack — What We Used & Why](#5-technology-stack--what-we-used--why)
 6. [Component Deep Dive](#6-component-deep-dive)
-   - 6.1 [Voice Agent (LiveKit Cloud + Python Agent)](#61-voice-agent-livekit-cloud--python-agent)
+   - 6.1 [Voice Agent (LiveKit Cloud Dashboard)](#61-voice-agent-livekit-cloud-dashboard--no-local-code)
    - 6.2 [Backend Server (Node.js + Express)](#62-backend-server-nodejs--express)
    - 6.3 [Database (Supabase / PostgreSQL)](#63-database-supabase--postgresql)
    - 6.4 [Smart Contract (Solidity on Ganache)](#64-smart-contract-solidity-on-ganache)
@@ -80,24 +80,25 @@ The research paper: *"A Novel Artificial Intelligence Voice Electronic Medical R
 
 ```
                           ┌─────────────────────────────────────┐
-                          │          LIVEKIT CLOUD               │
+                          │    LIVEKIT CLOUD DASHBOARD           │
+                          │    (All configured via Web UI)       │
                           │  ┌───────────┐  ┌──────────────┐    │
   ┌──────────┐  Phone     │  │    STT    │  │   LLM AI     │    │
-  │ Patient  │───Call─────▶│  │ (Deepgram)│─▶│(Gemini Flash)│    │
+  │ Patient  │───Call─────▶│  │  engine   │─▶│   engine     │    │
   │          │            │  └───────────┘  └──────┬───────┘    │
   └──────────┘            │  ┌───────────┐         │            │
                           │  │    TTS    │◀────────┘            │
-                          │  │ (Cartesia)│                      │
+                          │  │  engine   │                      │
                           │  └───────────┘                      │
                           │         │                           │
                           │         │ On Call End               │
                           │         ▼                           │
                           │  ┌──────────────┐                   │
-                          │  │  Summarizer  │                   │
-                          │  │(Gemini Flash)│                   │
+                          │  │ Call Summary │                   │
+                          │  │   Action     │                   │
                           │  └──────┬───────┘                   │
                           └─────────│───────────────────────────┘
-                                    │ HTTP POST (JSON)
+                                    │ Webhook: HTTP POST (JSON)
                                     ▼
                 ┌───────────────────────────────────────┐
                 │         BACKEND (Node.js/Express)      │
@@ -134,7 +135,7 @@ The research paper: *"A Novel Artificial Intelligence Voice Electronic Medical R
 
 | # | Component | Technology | Purpose |
 |---|-----------|-----------|---------|
-| 1 | **Voice Agent** | LiveKit Cloud + Python | Talks to patient on phone, collects symptoms |
+| 1 | **Voice Agent** | LiveKit Cloud Dashboard | Talks to patient on phone, collects symptoms |
 | 2 | **Backend** | Node.js + Express | Receives data, talks to DB & blockchain |
 | 3 | **Database** | Supabase (PostgreSQL) | Stores all EMR records |
 | 4 | **Blockchain** | Ganache + Solidity | Stores SHA256 hashes permanently |
@@ -150,7 +151,8 @@ The research paper: *"A Novel Artificial Intelligence Voice Electronic Medical R
 STEP 1: Patient dials the LiveKit phone number (+1-240-231-5068)
         │
         ▼
-STEP 2: LiveKit routes the call to our Python agent running on LiveKit Cloud
+STEP 2: LiveKit Cloud routes the call to its built-in AI Agent
+        (configured entirely through the LiveKit Dashboard — NO local code)
         │
         ▼
 STEP 3: The AI agent greets the patient:
@@ -170,11 +172,12 @@ STEP 5: Patient answers all questions. AI thanks them and ends the call.
 ### Phase B: Call Ends → EMR Created → Stored in DB + Blockchain
 
 ```
-STEP 6: When the call ends, the agent's "on_session_end" function fires
+STEP 6: When the call ends, LiveKit Cloud's "Call Summary" action fires
+        (configured in the LiveKit Dashboard → Agent → Actions → Call Summary)
         │
         ▼
-STEP 7: A SUMMARIZER LLM (Gemini 3 Flash) reads the entire conversation
-        and converts it into structured JSON:
+STEP 7: LiveKit's built-in summarizer LLM reads the entire conversation
+        and converts it into structured JSON using our prompt:
         {
           "patient_name": "Rahul",
           "age": 32,
@@ -186,8 +189,9 @@ STEP 7: A SUMMARIZER LLM (Gemini 3 Flash) reads the entire conversation
         }
         │
         ▼
-STEP 8: This JSON is sent via HTTP POST to our backend:
-        POST https://<our-tunnel-url>/api/emr-summary
+STEP 8: LiveKit sends this JSON via HTTP POST to our backend's webhook URL:
+        POST https://<cloudflare-tunnel-url>/api/emr-summary
+        (This webhook URL is configured in LiveKit Dashboard → Webhooks)
         │
         ▼
 STEP 9: Backend receives the JSON and:
@@ -237,11 +241,7 @@ STEP 17: Returns VERIFIED ✅ (hashes match) or TAMPERED ⚠️ (hashes differ)
 
 | Technology | What It Is | Why We Chose It |
 |-----------|-----------|----------------|
-| **LiveKit Cloud** | Real-time voice/video platform with telephony | Handles phone calls, STT, TTS, and AI conversations without us building any of that |
-| **Deepgram Nova 3** | Speech-to-Text (STT) engine | Highly accurate, real-time transcription of patient speech |
-| **Google Gemini 2.5 Flash** | Large Language Model (LLM) | Powers the AI conversation with the patient — understands and responds intelligently |
-| **Gemini 3 Flash** | LLM (for summarization) | Converts raw conversation into structured EMR JSON after the call ends |
-| **Cartesia Sonic 3** | Text-to-Speech (TTS) engine | Converts AI's text responses into natural-sounding voice |
+| **LiveKit Cloud** | Real-time voice/video platform with telephony | Handles phone calls, STT, TTS, LLM conversations, and call summaries — all configured via their web dashboard, no local code needed |
 | **Node.js + Express** | JavaScript backend framework | Simple, fast, excellent for building REST APIs |
 | **Supabase** | Cloud PostgreSQL database | Free, easy to use, provides instant REST API over Postgres |
 | **Ganache** | Local Ethereum blockchain | Simulates a real blockchain on our computer for development |
@@ -255,62 +255,57 @@ STEP 17: Returns VERIFIED ✅ (hashes match) or TAMPERED ⚠️ (hashes differ)
 
 ## 6. Component Deep Dive
 
-### 6.1 Voice Agent (LiveKit Cloud + Python Agent)
+### 6.1 Voice Agent (LiveKit Cloud Dashboard — NO Local Code)
 
-**File:** `medical-agent/agent.py`
+> ⚠️ **IMPORTANT:** We do NOT run any local Python agent. The voice agent runs **ENTIRELY** on LiveKit's Cloud Dashboard. There is no `agent.py` to run. We NEVER run `python agent.py`. All configuration (AI personality, Call Summary prompt, webhook URL) is done through the LiveKit web UI.
 
 #### What does this do?
-This is the AI that **talks to the patient on the phone**. It:
+The LiveKit Cloud Agent is the AI that **talks to the patient on the phone**. It:
 1. Greets the patient
 2. Asks for their name, age, symptoms, and duration
 3. After the call ends, summarizes the conversation into structured JSON
-4. Sends that JSON to our backend
+4. Sends that JSON to our backend via a webhook
 
-#### Key Parts Explained:
+#### How It's Configured (LiveKit Dashboard):
 
-```python
-# The AI's personality and instructions
-class DefaultAgent(Agent):
-    def __init__(self):
-        super().__init__(
-            instructions="""You are a helpful, professional, and empathetic 
-            medical assistant for Maneesha's clinic.
-            Your job is to ask the patient for their name, age, and symptoms.
-            ..."""
-        )
+**Step 1: Create a Cloud Agent**
+- Log into [cloud.livekit.io](https://cloud.livekit.io)
+- Create a new project and acquire a phone number
+- Create a Cloud Agent — this is the AI that will handle calls
+- The LLM model, STT engine, and TTS voice are all selected in the dashboard UI
+
+**Step 2: Set up Call Summary Action**
+- Go to Agent → Actions → Enable **Call Summary**
+- Paste this prompt into the instructions box:
 ```
-**What this does:** Tells the AI how to behave — like programming its personality.
-
-```python
-# When the call ends, this function runs automatically
-async def _on_session_end_func(ctx: JobContext):
-    # 1. Get conversation history
-    report = ctx.make_session_report()
-    
-    # 2. Send it to a summarizer LLM
-    summarizer = inference.LLM(model="google/gemini-3-flash")
-    summary = await _summarize_session(summarizer, report.chat_history)
-    
-    # 3. Send the summary to our backend
-    resp = await session.post(
-        "https://<tunnel-url>/api/emr-summary",
-        json=body
-    )
+You are a medical call summarization assistant.
+Convert the conversation into structured EMR data.
+Return JSON only. No explanations. No markdown.
+Fields: patient_name, age, symptoms, duration, medical_history, 
+diagnosis_guess, recommended_action.
 ```
-**What this does:** After the patient hangs up, this automatically creates the EMR JSON and sends it to our server.
+This tells LiveKit: "When the call ends, use the LLM to convert the conversation into this specific JSON format."
 
-#### The AI Pipeline:
+**Step 3: Set Webhook URL**
+- Go to Project Settings → Webhooks
+- Paste your Cloudflare tunnel URL + `/api/emr-summary`
+- Example: `https://basket-interaction-fill-transparent.trycloudflare.com/api/emr-summary`
+- This tells LiveKit: "After generating the call summary JSON, POST it to this URL."
+
+#### The AI Pipeline (all handled by LiveKit Cloud — we don't touch any of this):
 
 ```
-Patient speaks → Deepgram (STT) → Text → Gemini 2.5 Flash (LLM) → Response Text → Cartesia (TTS) → Voice → Patient hears
+Patient speaks → STT engine → Text → LLM → Response Text → TTS engine → Voice → Patient hears
+                (on LiveKit)       (on LiveKit)               (on LiveKit)
 ```
 
-| Component | Role | Model Used |
-|-----------|------|-----------|
-| **STT** (Speech-to-Text) | Converts patient's voice → text | Deepgram Nova 3 |
-| **LLM** (Language Model) | Thinks and generates responses | Gemini 2.5 Flash |
-| **TTS** (Text-to-Speech) | Converts AI response → voice | Cartesia Sonic 3 |
-| **Summarizer** | Converts conversation → EMR JSON | Gemini 3 Flash |
+| Component | Role | Where It Runs |
+|-----------|------|---------------|
+| **STT** (Speech-to-Text) | Converts patient's voice → text | LiveKit Cloud |
+| **LLM** (Language Model) | Thinks and generates responses | LiveKit Cloud |
+| **TTS** (Text-to-Speech) | Converts AI response → voice | LiveKit Cloud |
+| **Call Summary** | Converts conversation → EMR JSON | LiveKit Cloud |
+| **Webhook** | Sends JSON to our backend | LiveKit Cloud → our backend |
 
 ---
 
@@ -650,12 +645,15 @@ voice-emr-blockchain/
 ├── contracts/                        ← THE VAULT (Blockchain)
 │   └── EMRHashRegistry.sol           ← Solidity smart contract
 │
-├── medical-agent/                    ← THE EARS & MOUTH (AI Voice)
-│   ├── agent.py                      ← Root-level agent entrypoint
+├── medical-agent/                    ← TEMPLATE ONLY (NOT USED)
+│   ├── agent.py                      ← LiveKit template file (we don't run this)
 │   ├── src/
-│   │   └── agent.py                  ← Detailed agent implementation
-│   ├── requirements.txt              ← Python dependencies
-│   └── Dockerfile                    ← For deploying to LiveKit Cloud
+│   │   └── agent.py                  ← Template agent code (NOT USED)
+│   ├── requirements.txt              ← Python dependencies (NOT USED)
+│   └── Dockerfile                    ← Docker template (NOT USED)
+│   ⚠️ This folder exists as reference only.
+│      Our actual voice agent runs on LiveKit Cloud Dashboard.
+│      We NEVER run agent.py locally.
 │
 ├── README.md                         ← Project overview
 ├── architecture.md                   ← System architecture docs
@@ -724,7 +722,6 @@ voice-emr-blockchain/
 |----------|---------|-------------|
 | Node.js (v18+) | Run backend & frontend | https://nodejs.org |
 | Ganache | Local blockchain | https://trufflesuite.com/ganache |
-| Python 3.11+ | Run voice agent | https://python.org |
 | Git | Version control | https://git-scm.com |
 
 ### Step-by-Step
@@ -767,12 +764,12 @@ The voice agent runs on **LiveKit Cloud** — it's already deployed. You don't n
 ---
 
 ### Q2: How does the AI voice agent work?
-**A:** The agent uses three AI models in a pipeline:
-1. **Deepgram Nova 3** converts the patient's speech to text (STT)
-2. **Google Gemini 2.5 Flash** understands the text and generates intelligent responses (LLM)
-3. **Cartesia Sonic 3** converts the AI's text responses back to speech (TTS)
+**A:** The voice agent runs **entirely on LiveKit's Cloud Dashboard** — we don't run any local Python scripts. We configured it through the LiveKit web UI:
+1. **STT** (Speech-to-Text) converts the patient's speech to text
+2. **LLM** (Large Language Model) understands the text and generates intelligent responses
+3. **TTS** (Text-to-Speech) converts the AI's text responses back to speech
 
-After the call ends, a separate **Gemini 3 Flash** model summarizes the conversation into structured EMR JSON.
+All three components are selected and configured in the LiveKit Dashboard. After the call ends, LiveKit's built-in **Call Summary** action uses the LLM to summarize the conversation into structured EMR JSON and sends it to our backend via a webhook URL.
 
 ---
 
@@ -841,7 +838,7 @@ This works because SHA256 has an **avalanche effect** — even changing one char
 ---
 
 ### Q12: What is the Cloudflare Tunnel used for?
-**A:** The LiveKit voice agent runs on the cloud, but our backend runs on localhost. The Cloudflare Tunnel creates a public URL (like `https://xyz.trycloudflare.com`) that securely tunnels to our local backend. This allows the LiveKit agent to send webhook data (EMR summaries) to our local server.
+**A:** The LiveKit Cloud agent needs to send the call summary JSON to our backend, but our backend runs on localhost (our own computer). The Cloudflare Tunnel creates a public URL (like `https://xyz.trycloudflare.com`) that securely tunnels internet traffic to our local backend. We paste this URL into the LiveKit Dashboard as the webhook endpoint. This allows LiveKit Cloud to send webhook data (EMR summaries) to our local server.
 
 ---
 
