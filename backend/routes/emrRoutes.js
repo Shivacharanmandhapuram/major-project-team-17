@@ -1,260 +1,244 @@
-// =============================================
-// EMR Routes
-// =============================================
-// CRUD endpoints for Electronic Medical Records.
-// Handles creating, reading, updating, and
-// approving EMR records.
-// =============================================
-
 const express = require('express');
 const router = express.Router();
 const supabase = require('../config/supabaseClient');
-const { generateHash } = require('../utils/hashUtil');
-const { getContract } = require('../config/blockchainClient');
+const crypto = require('crypto');
+const { ethers } = require('ethers');
+const fs = require('fs');
+const path = require('path');
 
 /**
- * GET /api/emr
- * Fetch all EMR records (for the dashboard)
+ * POST /api/emr-summary
+ * Receives the JSON summary directly from LiveKit Cloud's End Call Call Summary tool.
+ * 
+ * Expected payload:
+ * {
+ *   "job_id": "...",
+ *   "room_id": "...",
+ *   "summary": "{...JSON String...}"
+ * }
  */
-router.get('/emr', async (req, res) => {
+router.post('/emr-summary', async (req, res) => {
     try {
-        if (!supabase) {
-            return res.json({
-                success: true,
-                message: 'Database not configured — returning sample data',
-                records: getSampleRecords(),
-            });
+        console.log('\n=======================================');
+        console.log('📞 CALL SUMMARY RECEIVED!');
+        console.log('=======================================\n');
+
+        // Acknowledge quickly to LiveKit
+        res.status(200).json({ received: true });
+
+        const { job_id, room_id, summary } = req.body;
+
+        if (!summary) {
+            console.log('⚠️ No summary found in the payload.');
+            return;
         }
 
+        console.log('--- RAW SUMMARY STRING ---');
+        console.log(summary);
+        console.log('--------------------------\n');
+
+        // Attempt to parse the summary string into an actual JSON object
+        let emrData;
+        try {
+            // Sometimes models wrap JSON in markdown blocks like ```json ... ```
+            // This cleans it up if necessary.
+            let cleanSummary = summary.replace(/```json/g, '').replace(/```/g, '').trim();
+            emrData = JSON.parse(cleanSummary);
+
+            console.log('✅ SUCCESSFULLY PARSED EMR JSON:');
+            console.dir(emrData, { depth: null, colors: true });
+
+            // Ensure the record has an ID
+            const recordId = `EMR-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+
+            // -----------------------------------------------------------------
+            // STEP 8 & 9: HASH GENERATION & BLOCKCHAIN STORAGE
+            // -----------------------------------------------------------------
+            let sha256Hash = null;
+            let txHash = null;
+
+            try {
+                // Generate deterministic SHA256 Hash of the JSON by sorting keys
+                const sortedKeys = Object.keys(emrData).sort();
+                const jsonString = JSON.stringify(emrData, sortedKeys);
+                sha256Hash = crypto.createHash('sha256').update(jsonString).digest('hex');
+                console.log(`🔒 EMR SHA256 Hash Generated: ${sha256Hash}`);
+
+                // Connect to Ganache
+                if (process.env.CONTRACT_ADDRESS && process.env.CONTRACT_ADDRESS !== 'your_contract_address_here') {
+                    const provider = new ethers.JsonRpcProvider(process.env.GANACHE_RPC_URL);
+                    const wallet = new ethers.Wallet(process.env.GANACHE_PRIVATE_KEY, provider);
+
+                    // Load the ABI that was generated when we deployed the contract
+                    const abiPath = path.resolve(__dirname, '..', 'EMRHashRegistry.json');
+                    const contractAbi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
+
+                    // Create contract instance
+                    const contract = new ethers.Contract(process.env.CONTRACT_ADDRESS, contractAbi, wallet);
+
+                    console.log('⛓️  Sending hash to Ganache blockchain...');
+                    const tx = await contract.storeHash(recordId, sha256Hash);
+                    await tx.wait(); // Wait for transaction confirmation
+
+                    txHash = tx.hash;
+                    console.log(`✅ Hash immutably stored on blockchain! TX: ${txHash}`);
+                }
+            } catch (chainError) {
+                console.error('❌ Blockchain/Hashing Error:', chainError.message);
+            }
+
+            // Ensure the record has an ID
+            const record = {
+                record_id: recordId,
+                patient_name: emrData.patient_name || 'Unknown',
+                age: emrData.age || 0,
+                symptoms: emrData.symptoms || [],
+                duration: emrData.duration || 'Unknown',
+                medical_history: emrData.medical_history || 'None',
+                diagnosis_guess: emrData.diagnosis_guess || 'Pending',
+                recommended_action: emrData.recommended_action || 'Pending',
+                appointment_date: emrData.appointment_date || null,
+                appointment_time: emrData.appointment_time || null,
+                summary_json: emrData,
+                sha256_hash: sha256Hash,
+                blockchain_tx_hash: txHash,
+                created_at: new Date().toISOString()
+            };
+
+            if (record.appointment_date) {
+                console.log(`📅 Appointment scheduled: ${record.appointment_date} at ${record.appointment_time}`);
+            }
+
+            // Save to Supabase
+            if (supabase) {
+                const { data, error } = await supabase
+                    .from('emr_records')
+                    .insert([record])
+                    .select();
+
+                if (error) {
+                    console.error('❌ Supabase DB Error:', error.message);
+                } else {
+                    console.log(`✅ EMR saved to Supabase! Record ID: ${recordId}`);
+                }
+            } else {
+                console.log('⚠️ Supabase client not initialized. Cannot save to DB.');
+            }
+
+        } catch (parseError) {
+            console.error('❌ Failed to parse summary as JSON. Verify your LiveKit LLM instructions returning strict JSON.');
+            console.error(parseError.message);
+            return;
+        }
+
+    } catch (error) {
+        console.error('Webhook error:', error);
+    }
+});
+
+// -----------------------------------------------
+// GET /api/emr — Fetch all EMR records from Supabase
+// -----------------------------------------------
+router.get('/emr', async (req, res) => {
+    try {
+        // No-cache so the browser always gets fresh records, not 304
+        res.set('Cache-Control', 'no-store');
         const { data, error } = await supabase
             .from('emr_records')
             .select('*')
             .order('created_at', { ascending: false });
 
         if (error) throw error;
-
-        res.json({ success: true, records: data });
-    } catch (error) {
-        console.error('Fetch EMR error:', error);
-        res.status(500).json({ error: 'Failed to fetch records', details: error.message });
+        res.json({ success: true, records: data || [] });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
-/**
- * GET /api/emr/:recordId
- * Fetch a single EMR record by ID
- */
-router.get('/emr/:recordId', async (req, res) => {
+// -----------------------------------------------
+// GET /api/emr/:id — Fetch a single EMR record
+// -----------------------------------------------
+router.get('/emr/:id', async (req, res) => {
     try {
-        if (!supabase) {
-            return res.status(503).json({ error: 'Database not configured' });
-        }
-
         const { data, error } = await supabase
             .from('emr_records')
             .select('*')
-            .eq('record_id', req.params.recordId)
+            .eq('record_id', req.params.id)
             .single();
 
         if (error) throw error;
-        if (!data) return res.status(404).json({ error: 'Record not found' });
-
         res.json({ success: true, record: data });
-    } catch (error) {
-        console.error('Fetch single EMR error:', error);
-        res.status(500).json({ error: 'Failed to fetch record', details: error.message });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
-/**
- * PUT /api/emr/:recordId
- * Update an EMR record (doctor edits before approval)
- */
-router.put('/emr/:recordId', async (req, res) => {
+// -----------------------------------------------
+// PUT /api/emr/:id — Update an EMR record (Doctor edits)
+// -----------------------------------------------
+router.put('/emr/:id', async (req, res) => {
     try {
-        if (!supabase) {
-            return res.status(503).json({ error: 'Database not configured' });
-        }
-
-        const { patient_name, age, symptoms, diagnosis, prescription } = req.body;
-
+        const updates = req.body;
         const { data, error } = await supabase
             .from('emr_records')
-            .update({ patient_name, age, symptoms, diagnosis, prescription })
-            .eq('record_id', req.params.recordId)
-            .select();
+            .update(updates)
+            .eq('record_id', req.params.id)
+            .select()
+            .single();
 
         if (error) throw error;
-
-        res.json({ success: true, message: 'Record updated', record: data[0] });
-    } catch (error) {
-        console.error('Update EMR error:', error);
-        res.status(500).json({ error: 'Failed to update record', details: error.message });
+        res.json({ success: true, record: data });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
-/**
- * POST /api/approve-emr/:recordId
- * Doctor approves an EMR record.
- * This triggers:
- * 1. SHA256 hash generation
- * 2. Blockchain storage
- * 3. Database update with hash and txHash
- */
-router.post('/approve-emr/:recordId', async (req, res) => {
+// -----------------------------------------------
+// POST /api/approve-emr/:id — Doctor approves the EMR
+// -----------------------------------------------
+router.post('/approve-emr/:id', async (req, res) => {
     try {
-        if (!supabase) {
-            return res.status(503).json({ error: 'Database not configured' });
-        }
-
-        // Step 1: Fetch the record
-        const { data: record, error: fetchError } = await supabase
+        const { data: existing, error: fetchError } = await supabase
             .from('emr_records')
             .select('*')
-            .eq('record_id', req.params.recordId)
+            .eq('record_id', req.params.id)
             .single();
 
         if (fetchError) throw fetchError;
-        if (!record) return res.status(404).json({ error: 'Record not found' });
+        if (!existing) return res.status(404).json({ success: false, error: 'Record not found' });
 
-        if (record.status === 'approved') {
-            return res.status(400).json({ error: 'Record already approved' });
-        }
-
-        // Step 2: Generate SHA256 hash
-        const sha256Hash = generateHash(record);
-        console.log(`🔒 SHA256 hash generated: ${sha256Hash}`);
-
-        // Step 3: Store hash on blockchain (if configured)
-        let blockchainTxHash = null;
-        try {
-            const contract = getContract();
-            const tx = await contract.storeHash(record.record_id, sha256Hash);
-            const receipt = await tx.wait();
-            blockchainTxHash = receipt.hash;
-            console.log(`⛓️  Blockchain tx: ${blockchainTxHash}`);
-        } catch (bcError) {
-            console.warn('⚠️  Blockchain not available:', bcError.message);
-            console.warn('   EMR will be approved without blockchain verification.');
-        }
-
-        // Step 4: Update the database
-        const { data: updated, error: updateError } = await supabase
+        const { data, error } = await supabase
             .from('emr_records')
-            .update({
-                status: 'approved',
-                approved_at: new Date().toISOString(),
-                sha256_hash: sha256Hash,
-                blockchain_tx_hash: blockchainTxHash,
-            })
-            .eq('record_id', req.params.recordId)
-            .select();
+            .update({ status: 'approved' })
+            .eq('record_id', req.params.id)
+            .select()
+            .single();
 
-        if (updateError) throw updateError;
-
-        res.json({
-            success: true,
-            message: 'EMR approved successfully',
-            record: updated[0],
-            blockchain: {
-                hash: sha256Hash,
-                txHash: blockchainTxHash,
-                stored: blockchainTxHash !== null,
-            },
-        });
-
-    } catch (error) {
-        console.error('Approve EMR error:', error);
-        res.status(500).json({ error: 'Failed to approve record', details: error.message });
+        if (error) throw error;
+        console.log(`✅ EMR ${req.params.id} approved by doctor.`);
+        res.json({ success: true, record: data });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
-/**
- * POST /api/create-emr
- * Manually create an EMR record (for testing)
- */
-router.post('/create-emr', async (req, res) => {
+// -----------------------------------------------
+// GET /api/appointments — All records with appointments
+// -----------------------------------------------
+router.get('/appointments', async (req, res) => {
     try {
-        const { patient_name, age, symptoms, diagnosis, prescription, transcript, doctor_id } = req.body;
+        res.set('Cache-Control', 'no-store');
+        const { data, error } = await supabase
+            .from('emr_records')
+            .select('*')
+            .not('appointment_date', 'is', null)
+            .order('appointment_date', { ascending: true });
 
-        if (!patient_name || !symptoms) {
-            return res.status(400).json({ error: 'patient_name and symptoms are required' });
-        }
-
-        const recordId = `EMR-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
-
-        const emrRecord = {
-            record_id: recordId,
-            patient_name,
-            age: age || null,
-            symptoms,
-            diagnosis: diagnosis || 'Pending doctor review',
-            prescription: prescription || 'Pending doctor review',
-            transcript: transcript || 'Manual entry',
-            doctor_id: doctor_id || 'DR-001',
-            status: 'pending_review',
-            confidence_score: 100, // Manual entry = full confidence
-            created_at: new Date().toISOString(),
-            approved_at: null,
-            sha256_hash: null,
-            blockchain_tx_hash: null,
-        };
-
-        if (supabase) {
-            const { data, error } = await supabase
-                .from('emr_records')
-                .insert([emrRecord])
-                .select();
-
-            if (error) throw error;
-            return res.json({ success: true, message: 'EMR created', record: data[0] });
-        }
-
-        res.json({ success: true, message: 'EMR created (no DB)', record: emrRecord });
-    } catch (error) {
-        console.error('Create EMR error:', error);
-        res.status(500).json({ error: 'Failed to create record', details: error.message });
+        if (error) throw error;
+        res.json({ success: true, appointments: data || [] });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
-
-/**
- * Sample data for when DB is not connected
- */
-function getSampleRecords() {
-    return [
-        {
-            record_id: 'EMR-SAMPLE-001',
-            patient_name: 'John Smith',
-            age: 45,
-            symptoms: 'headache, fever (severity: severe) (duration: 3 days)',
-            diagnosis: 'Acute viral infection',
-            prescription: 'Paracetamol 500mg, Rest',
-            transcript: 'Hello, my name is John Smith. I am 45 years old. I have been experiencing severe headache and fever for the past 3 days.',
-            doctor_id: 'DR-001',
-            status: 'pending_review',
-            confidence_score: 85,
-            created_at: new Date().toISOString(),
-            approved_at: null,
-            sha256_hash: null,
-            blockchain_tx_hash: null,
-        },
-        {
-            record_id: 'EMR-SAMPLE-002',
-            patient_name: 'Sarah Johnson',
-            age: 32,
-            symptoms: 'cough, sore throat, runny nose (duration: 1 week)',
-            diagnosis: 'Common cold',
-            prescription: 'Cough syrup, Vitamin C',
-            transcript: 'Hi, this is Sarah Johnson. I am 32 years old. I have had a cough and sore throat with a runny nose for the past 1 week.',
-            doctor_id: 'DR-001',
-            status: 'approved',
-            confidence_score: 90,
-            created_at: new Date(Date.now() - 86400000).toISOString(),
-            approved_at: new Date().toISOString(),
-            sha256_hash: 'a1b2c3d4e5f6...',
-            blockchain_tx_hash: '0xabc123...',
-        },
-    ];
-}
 
 module.exports = router;

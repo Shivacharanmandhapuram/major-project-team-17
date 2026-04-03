@@ -11,9 +11,9 @@ const cors = require('cors');
 require('dotenv').config();
 
 // Import route modules
-const livekitRoutes = require('./routes/livekitRoutes');
 const emrRoutes = require('./routes/emrRoutes');
 const blockchainRoutes = require('./routes/blockchainRoutes');
+const verificationRoutes = require('./routes/verificationRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -31,7 +31,6 @@ app.get('/', (req, res) => {
     message: 'AI Voice EMR Blockchain — Backend is running',
     version: '1.0.0',
     endpoints: {
-      elevenlabs: '/api/elevenlabs-webhook',
       emr: '/api/emr',
       blockchain: '/api/blockchain'
     }
@@ -39,9 +38,9 @@ app.get('/', (req, res) => {
 });
 
 // ---- Routes ----
-app.use('/api', livekitRoutes);
 app.use('/api', emrRoutes);
 app.use('/api', blockchainRoutes);
+app.use('/api', verificationRoutes);
 
 // ---- Global Error Handler ----
 app.use((err, req, res, next) => {
@@ -53,7 +52,6 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`\n✅ Backend server running on http://localhost:${PORT}`);
   console.log(`📋 Health check: http://localhost:${PORT}/`);
-  console.log(`🔗 ElevenLabs webhook: http://localhost:${PORT}/api/elevenlabs-webhook`);
   console.log(`📄 EMR endpoints: http://localhost:${PORT}/api/emr`);
   console.log(`⛓️  Blockchain:    http://localhost:${PORT}/api/blockchain\n`);
 });
